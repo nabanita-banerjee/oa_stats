@@ -1,0 +1,108 @@
+From bd00968fac4ce892dd16f6764dcb3b608137916c Mon Sep 17 00:00:00 2001
+From: Banerjee, Nabanita <nabanita.banerjee@intel.com>
+Date: Fri, 12 Feb 2021 11:16:19 +0530
+Subject: [PATCH] [WIP]Co3: OA Remaining External Stats Implementation for COBE
+
+ - Added support for the following events:
+    PIXEL_WRITE
+    PIXEL_BLEND
+    RENDER_CACHE_ALLOC
+    RENDER_CACHE_HIT
+    RENDER_CACHE_READ
+
+Change-Id: Ib51a00dfd40665b9bbaacce90b39b4c7fd733669
+---
+
+diff --git a/ip_graphics_core/color_cluster/inc/PbeBackend.h b/ip_graphics_core/color_cluster/inc/PbeBackend.h
+index b0f32fb..8f0f52e 100644
+--- a/ip_graphics_core/color_cluster/inc/PbeBackend.h
++++ b/ip_graphics_core/color_cluster/inc/PbeBackend.h
+@@ -39,6 +39,7 @@
+ #include "fifo_ports.h"
+ #include "unit.h"
+ #include <queue>
++#include "oa_stats_counters.h"
+ 
+ class CMscRcCAllocReqInf;
+ class CRcPbCAllocAddrInf;
+@@ -254,6 +255,9 @@
+     int32_t m_numPbeToMScCompletionsPending[ColorBEConsts::NUM_INPUTS_PER_NODE]{};
+     cvector<internal_fifo<xefi_completion, 256>> m_pbeToMscCompletions; // TODO: how deep should be this fifo?
+ 
++    cobalt::oa_stats_counter CB_OBJ(m_pixel_write, oa_event::COBE_PIXEL_WRITE);
++    cobalt::oa_stats_counter CB_OBJ(m_pixel_blend, oa_event::COBE_PIXEL_BLEND);
++
+     std::vector<PbePreBlendSyncStatus> m_syncStatusDeque; // TODO: change from vector to something else
+ 
+     unsigned m_isBlendSardDone = 0;
+diff --git a/ip_graphics_core/color_cluster/inc/RcRCC.h b/ip_graphics_core/color_cluster/inc/RcRCC.h
+index e003653..1cbf51d 100644
+--- a/ip_graphics_core/color_cluster/inc/RcRCC.h
++++ b/ip_graphics_core/color_cluster/inc/RcRCC.h
+@@ -340,6 +340,9 @@
+     std::vector<int32_t> m_AllocCacheLine_internal;
+     std::vector<BitVec<48>> cachelinAlignedVA;
+     CPbeRccAllocReqInf m_AllocReqColorData;
++    cobalt::oa_stats_counter CB_OBJ(m_render_cache_alloc, oa_event::COBE_RENDER_CACHE_ALLOC);
++    cobalt::oa_stats_counter CB_OBJ(m_render_cache_hit, oa_event::COBE_RENDER_CACHE_HIT);
++    cobalt::oa_stats_counter CB_OBJ(m_render_cache_read, oa_event::COBE_RENDER_CACHE_READ);
+ 
+     cobalt::oa_stats_counter CB_OBJ(m_color_rcc_evict, oa_event::COLOR_RCC_EVICT);
+     cobalt::oa_stats_counter CB_OBJ(m_color_rcc_miss, oa_event::COLOR_RCC_MISS);
+diff --git a/ip_graphics_core/color_cluster/src/PbeBackend.cpp b/ip_graphics_core/color_cluster/src/PbeBackend.cpp
+index 53be5f6..1ed65c0 100644
+--- a/ip_graphics_core/color_cluster/src/PbeBackend.cpp
++++ b/ip_graphics_core/color_cluster/src/PbeBackend.cpp
+@@ -36,7 +36,6 @@
+ #include "SurfaceFormat.h"
+ #include "fifo_dump.h"
+ #include "oa_signal.h"
+-#include "oa_stats_counters.h"
+ 
+ using std::dec;
+ using std::ios;
+@@ -3481,6 +3480,8 @@
+ 
+     pbRcCWriteDataInf.rcpbe_oa_pix_wrt   = OANoWriteRenderTarget;
+     pbRcCWriteDataInf.rcpbe_oa_blend_wrt = OANoBlendWriteRenderTarget;
++    m_pixel_write.increment(OANoWriteRenderTarget);
++    m_pixel_blend.increment(OANoBlendWriteRenderTarget);
+ 
+ #if _BullseyeCoverage
+ #    pragma BullseyeCoverage off
+diff --git a/ip_graphics_core/color_cluster/src/RcRCC.cpp b/ip_graphics_core/color_cluster/src/RcRCC.cpp
+index 6ab3958..6bfad9d 100644
+--- a/ip_graphics_core/color_cluster/src/RcRCC.cpp
++++ b/ip_graphics_core/color_cluster/src/RcRCC.cpp
+@@ -302,6 +302,7 @@
+     CPbRcCReadReqInf pbeRccColorDataReadReq = PbeRccReadReqFifo_In.read_location();
+     CB_LOG(VERBOSE) << ": Read Request received from PBE for VA=0x" << std::hex
+                     << pbeRccColorDataReadReq.rcc_virtual_address;
++    m_render_cache_read.increment();
+     // Coherency Stall
+     // If any PBE write request is in flight on the same CL address, then stall the read, otherwise read data may not be
+     // coherent
+@@ -2181,6 +2182,7 @@
+                             << std::hex << pberccAllocReqInf.rcc_virtual_address << " Assigning cacheline=" << std::dec
+                             << cacheLine << " in index" << i;
+             cacheHit = true;
++            m_render_cache_hit.increment();
+             break;
+         }
+     }
+@@ -2199,6 +2201,7 @@
+             // bump up LRA on the set. if not hit, return new CL address
+             cacheLine              = m_pCacheObject->Update(cacheHit, cacheLine); // cacheline updated here
+             cacheTag               = m_pCacheObject->GetTag(cacheLine);
++            //m_render_cache_alloc.increment();
+             bool const sameAddress = (CacheLineAlignedAddress == cacheTag->GetAddress());
+             bool Refcountcheck     = cacheTag->GetRefCount() == 0;
+             if (Refcountcheck || (sameAddress && cacheHit))
+@@ -2405,6 +2408,7 @@
+                     m_pCacheObject->FillWithXMMWord(cacheLine, cclear.m_RTConverted_src_clear.dwords);
+                     break;
+             }
++            m_render_cache_alloc.increment();
+             // resolve pass, first phase, no eviction, read from CC first
+             if (!clrReq4RTread && !clrReq4ResolveClearColor)
+             {
